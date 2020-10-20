@@ -136,6 +136,7 @@ func TestRPCBytes2B(t *testing.T) {
 	iters := 10
 	var sent int64 = 0
 	for index := 2; index < iters+2; index++ {
+		DPrintf("[TEST] index %v starts", index)
 		cmd := randstring(5000)
 		xindex := cfg.one(cmd, servers, false)
 		if xindex != index {
@@ -166,6 +167,7 @@ func TestFailAgree2B(t *testing.T) {
 	// disconnect one follower from the network.
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 1) % servers)
+	DPrintf("[TEST] [%v] disconnected", (leader+1)%servers)
 
 	// the leader and remaining follower should be
 	// able to agree despite the disconnected follower.
@@ -175,6 +177,8 @@ func TestFailAgree2B(t *testing.T) {
 	cfg.one(104, servers-1, false)
 	cfg.one(105, servers-1, false)
 
+	DPrintf("[TEST] Correct with one follower disconnected")
+	DPrintf("[TEST] [%v] rejoins", (leader+1)%servers)
 	// re-connect
 	cfg.connect((leader + 1) % servers)
 
