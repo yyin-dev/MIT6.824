@@ -8,12 +8,14 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
-import "fmt"
-import "time"
-import "math/rand"
-import "sync/atomic"
-import "sync"
+import (
+	"fmt"
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -58,22 +60,30 @@ func TestReElection2A(t *testing.T) {
 	cfg.begin("Test (2A): election after network failure")
 
 	leader1 := cfg.checkOneLeader()
+	DPrintf("[TEST] checkOneLeader passes. Current leader is [%v]", leader1)
 
 	// if the leader disconnects, a new one should be elected.
+	DPrintf("[TEST] Current leader [%v] disconnects. Will recheck if leader elected", leader1)
 	cfg.disconnect(leader1)
-	cfg.checkOneLeader()
+	leader11 := cfg.checkOneLeader()
+	DPrintf("[TEST] checkOneLeader passes. Current leader is [%v]", leader11)
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader.
+	DPrintf("[TEST] Old leader [%v] rejoins", leader1)
 	cfg.connect(leader1)
+	DPrintf("[TEST] Wait for new leader to be elected")
 	leader2 := cfg.checkOneLeader()
+	DPrintf("[TEST] CheckOneLeader passes. Current leader is [%v]", leader2)
 
 	// if there's no quorum, no leader should
 	// be elected.
 	cfg.disconnect(leader2)
 	cfg.disconnect((leader2 + 1) % servers)
+	DPrintf("[TEST] [%v] and [%v] disconnect", leader2, (leader2+1)%servers)
 	time.Sleep(2 * RaftElectionTimeout)
 	cfg.checkNoLeader()
+	DPrintf("[TEST] There's no leader indeed")
 
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
