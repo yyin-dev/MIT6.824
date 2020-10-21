@@ -312,6 +312,11 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+
+	// Fast rollback
+	XTerm  int // term of the conflicting entry (-1 if none)
+	XIndex int // index of the first entry with XTerm (-1 if none)
+	XLen   int // log length
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -333,6 +338,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// obsolete AppendEntries
 	if args.Term < rf.currTerm {
+		// Fast rollback
+		// No need to fill the reply, since leader wouldn't use this info
 		return
 	}
 
@@ -346,6 +353,36 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// log not matching
 	if len(rf.log) <= args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		// Fast rollback
+		if len(rf.log) <= args.PrevLogIndex {
+			// len(rf.log) <= args.PrevLogIndex ==> Leader's log is too short
+			//    0 1 2 3
+			// S1 4
+			// S2 4 6 6 6, prevLogIndex = 1.
+			// Only XLen matters. Set XTerm = XIndex = -1.
+			reply.XTerm = -1
+			reply.XIndex = -1
+			reply.XLen = len(rf.log)
+		} else {
+			// rf.log[args.PrevLogIndex].Term != args.PrevLogTerm => leader's log is not too short
+			//    0 1 2 3
+			// S1 4 5 5
+			// S2 4 6 6 6, prevLogIndex = 1/2. => XTerm: 5, XIndex = 1
+			//
+			// S1 4 4 4
+			// S2 4 6 6 6, prevLogIndex = 1/2. => XTerm: 4, XIndex = 0
+
+			// XTerm >= 0, XIndex >= 1
+			reply.XTerm = rf.log[args.PrevLogIndex].Term
+			for i := args.PrevLogIndex; i >= 1; i-- {
+				if rf.log[i].Term == rf.log[args.PrevLogIndex].Term {
+					reply.XIndex = i
+				} else {
+					break
+				}
+			}
+			reply.XLen = len(rf.log)
+		}
 		return
 	}
 
@@ -459,16 +496,9 @@ func (rf *Raft) sendAppendEntriesToPeers() {
 			}
 
 			DPrintf("[%v] AppendEntries reply from [%v] is %v. prevLogIndex = %v. Entries = %v", leaderID, server, reply.Success, prevLogIndex, entries)
-			// Reasons for false reply:
-			// Case 1. term < follower's term
-			// Case 2. log mismatch
-			// If case 1 is true, then we would exit already. So here, the only
-			// reason for negative reply is log inconsistency.
 			if reply.Success {
 				DPrintf("Before update: ")
 				DPrintf("[%v] nextIndex[%v] = %v, matchIndex[%v] = %v", leaderID, server, rf.nextIndex[server], server, rf.matchIndex[server])
-				// rf.nextIndex[server] = rf.nextIndex[server] + len(args.Entries)
-				// rf.matchIndex[server] = rf.matchIndex[server] + len(args.Entries)
 				rf.nextIndex[server] = prevLogIndex + len(args.Entries) + 1
 				rf.matchIndex[server] = prevLogIndex + len(args.Entries)
 				DPrintf("After update: ")
@@ -493,7 +523,37 @@ func (rf *Raft) sendAppendEntriesToPeers() {
 					}
 				}
 			} else {
-				rf.nextIndex[server]--
+				// Reasons for false reply:
+				// Case 1. term < follower's term
+				// Case 2. log mismatch
+				// If case 1 is true, then we would exit already. So here, the only
+				// reason for negative reply is log inconsistency.
+
+				// slow rollback
+				// rf.nextIndex[server]--
+
+				// fast rollback
+				if reply.XTerm == -1 && reply.XIndex == -1 {
+					// case 3
+					rf.nextIndex[server] = reply.XLen
+				} else {
+					foundIndex := -1
+					for i := len(rf.log) - 1; i >= 1; i-- {
+						if rf.log[i].Term == reply.XTerm {
+							foundIndex = i
+							break
+						} else if rf.log[i].Term < reply.XTerm {
+							break
+						}
+					}
+					if foundIndex == -1 {
+						// case 1
+						rf.nextIndex[server] = reply.XIndex
+					} else {
+						// case 2
+						rf.nextIndex[server] = foundIndex
+					}
+				}
 			}
 		}(i, rf.currTerm, rf.me, prevLogIndex, prevLogTerm, entries, rf.commitIndex)
 	}
