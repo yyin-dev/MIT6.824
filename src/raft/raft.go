@@ -18,15 +18,16 @@ package raft
 //
 
 import (
+	"bytes"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"../labgob"
 	"../labrpc"
 )
 
 // import "bytes"
-// import "../labgob"
 
 const (
 	leader    = "Leader"
@@ -118,12 +119,15 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+
+	// Should be called only when holding the lock
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -133,19 +137,26 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
+
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currTerm int
+	var votedFor int
+	var log []logEntry
+	if d.Decode(&currTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil {
+		DPrintf("Cannot read persisted state")
+	} else {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+
+		rf.currTerm = currTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
 }
 
 //
@@ -182,6 +193,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currTerm = args.Term
 		rf.votedFor = noVote
 		rf.state = follower
+		rf.persist()
 		DPrintf("[%v] reverts to follower when receiving RequestVote call from [%v]", rf.me, args.CandidateID)
 	}
 
@@ -195,6 +207,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if (rf.votedFor == noVote || rf.votedFor == args.CandidateID) && upToDate {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateID
+		rf.persist()
 
 		// granting vote, reset election timer
 		rf.prevTimeElecSuppressed = time.Now()
@@ -219,6 +232,7 @@ func (rf *Raft) periodicElection() {
 			rf.state = candidate
 			rf.currTerm++
 			rf.votedFor = rf.me
+			rf.persist()
 			rf.votesReceived = 1
 			rf.prevTimeElecSuppressed = time.Now()
 			rf.elecTimeout = genRandomElecTimeout()
@@ -252,6 +266,7 @@ func (rf *Raft) periodicElection() {
 						rf.currTerm = args.Term
 						rf.votedFor = noVote
 						rf.state = follower
+						rf.persist()
 						DPrintf("[%v] reverts to follower when receiving RequestVote reply from [%v]", rf.me, server)
 						return
 					}
@@ -309,6 +324,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.currTerm = args.Term
 		rf.votedFor = noVote
 		rf.state = follower
+		rf.persist()
 		DPrintf("[%v] reverts to follower when receiving AppendEntries call from [%v]", rf.me, args.LeaderID)
 	}
 
@@ -359,6 +375,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.log = append(rf.log, args.Entries[i])
 	}
 	DPrintf("[%v] updated log: %v", rf.me, rf.log)
+	rf.persist()
 
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
@@ -432,11 +449,12 @@ func (rf *Raft) sendAppendEntriesToPeers() {
 				rf.currTerm = args.Term
 				rf.votedFor = noVote
 				rf.state = follower
+				rf.persist()
 				DPrintf("[%v] reverts to follower after receving reply from AppendEntries", rf.me)
 			}
 
 			if term != rf.currTerm || rf.state != leader {
-				// term confusion (student's guide). Drop repy and return
+				// term confusion (student's guide). Drop reply and return
 				return
 			}
 
@@ -539,6 +557,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Command: command,
 		}
 		rf.log = append(rf.log, entry)
+		rf.persist()
 		DPrintf("[%v] receives from client %v, current log: %v", rf.me, command, rf.log)
 	}
 
