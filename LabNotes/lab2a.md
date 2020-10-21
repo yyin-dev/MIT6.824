@@ -16,7 +16,7 @@ func (rf *Raft) periodicAppendEntries() {
 			// Release the lock before return! Otherwise you get deadlock
 			// cannot be detected by Go's race detector. Since other servers
 			// are still functioning.
-             rf.mu.Unlock()
+             rf.mu.Unlock() // (*)
 			return
 		}
 
@@ -35,5 +35,5 @@ func (rf *Raft) periodicAppendEntries() {
 }
 ```
 
-It's crucial to release the lock at line 14. Otherwise, this server would hangs, while other servers are still running. No deadlock would be reported by Go's race detector in this case.
+It's crucial to release the lock at `(*)`. Otherwise, this server would hangs, while other servers are still running. No deadlock would be reported by Go's race detector in this case.
 
