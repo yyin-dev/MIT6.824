@@ -27,8 +27,6 @@ import (
 	"../labrpc"
 )
 
-// import "bytes"
-
 const (
 	leader    = "Leader"
 	follower  = "Follower"
