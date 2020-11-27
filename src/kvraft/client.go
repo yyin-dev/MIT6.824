@@ -1,13 +1,17 @@
 package kvraft
 
-import "../labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
 
+	"../labrpc"
+)
 
 type Clerk struct {
-	servers []*labrpc.ClientEnd
-	// You will have to modify this struct.
+	servers    []*labrpc.ClientEnd
+	cid        int64
+	nextSeq    int
+	prevLeader int
 }
 
 func nrand() int64 {
@@ -17,10 +21,13 @@ func nrand() int64 {
 	return x
 }
 
+// Assume that a client will make only one call into a Clerk at a time.
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	// You'll have to add code here.
+	ck.cid = nrand()
+	ck.nextSeq = 1
+	ck.prevLeader = 0
 	return ck
 }
 
@@ -37,9 +44,34 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
+	DPrintf("Client: GET(%v) starts", key)
 
-	// You will have to modify this function.
-	return ""
+	args := GetArgs{
+		Key: key,
+		Cid: ck.cid,
+		Seq: ck.nextSeq,
+	}
+	ck.nextSeq++
+
+	for i := ck.prevLeader; ; i = (i + 1) % len(ck.servers) {
+		reply := GetReply{}
+		ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
+		if ok {
+			switch reply.Err {
+			case OK:
+				ck.prevLeader = i
+				DPrintf("Client: GET(%v) -> %v.", key, reply.Value)
+				return reply.Value
+			case ErrNoKey:
+				ck.prevLeader = i
+				DPrintf("Client: GET(%v) -> %v.", key, "")
+				return ""
+			case ErrWrongLeader:
+				continue
+			}
+		}
+	}
+
 }
 
 //
@@ -53,7 +85,30 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
+	DPrintf("Client: %v(%v, %v) starts", op, key, value)
+	args := PutAppendArgs{
+		Key:   key,
+		Value: value,
+		Op:    op,
+		Cid:   ck.cid,
+		Seq:   ck.nextSeq,
+	}
+	ck.nextSeq++
+
+	for i := ck.prevLeader; ; i = (i + 1) % len(ck.servers) {
+		reply := GetReply{}
+		ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
+		if ok {
+			switch reply.Err {
+			case OK:
+				ck.prevLeader = i
+				DPrintf("Client: %v(%v, %v) done", op, key, value)
+				return
+			case ErrWrongLeader:
+				continue
+			}
+		}
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {

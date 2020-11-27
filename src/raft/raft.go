@@ -54,6 +54,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int
 }
 
 type logEntry struct {
@@ -495,12 +496,8 @@ func (rf *Raft) sendAppendEntriesToPeers() {
 
 			DPrintf("[%v] AppendEntries reply from [%v] is %v. prevLogIndex = %v. Entries = %v", leaderID, server, reply.Success, prevLogIndex, entries)
 			if reply.Success {
-				DPrintf("Before update: ")
-				DPrintf("[%v] nextIndex[%v] = %v, matchIndex[%v] = %v", leaderID, server, rf.nextIndex[server], server, rf.matchIndex[server])
 				rf.nextIndex[server] = prevLogIndex + len(args.Entries) + 1
 				rf.matchIndex[server] = prevLogIndex + len(args.Entries)
-				DPrintf("After update: ")
-				DPrintf("[%v] nextIndex[%v] = %v, matchIndex[%v] = %v", leaderID, server, rf.nextIndex[server], server, rf.matchIndex[server])
 
 				// Check for commited entry
 				for N := len(rf.log) - 1; N > rf.commitIndex; N-- {
@@ -572,10 +569,12 @@ func (rf *Raft) applyCommitted() {
 
 		// rf.lastApplied < rf.commitIndex
 		rf.lastApplied++
+		logEntry := rf.log[rf.lastApplied]
 		msg := ApplyMsg{
 			CommandValid: true,
-			Command:      rf.log[rf.lastApplied].Command,
+			Command:      logEntry.Command,
 			CommandIndex: rf.lastApplied,
+			CommandTerm:  logEntry.Term,
 		}
 		DPrintf("[%v] updates lastApplied to %v, sending on applyCh", rf.me, rf.lastApplied)
 		rf.mu.Unlock()
@@ -616,7 +615,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		}
 		rf.log = append(rf.log, entry)
 		rf.persist()
-		DPrintf("[%v] receives from client %v, current log: %v", rf.me, command, rf.log)
+		DPrintf("[%v] receives from server %v, current log: %v", rf.me, command, rf.log)
 	}
 
 	return index, term, isLeader
