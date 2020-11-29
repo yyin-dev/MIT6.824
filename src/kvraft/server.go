@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,6 +39,10 @@ type KVServer struct {
 	applyResMap   map[int64](map[int]bool)
 	applyCond     *sync.Cond
 	waitApplyTime time.Duration
+	persister     *raft.Persister
+
+	lastAppliedIndex int
+	lastAppliedTerm  int
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -142,29 +147,98 @@ func (kv *KVServer) applyCommitted() {
 	for msg := range kv.applyCh {
 		kv.mu.Lock()
 
-		DPrintf("=%v= %v <- applyCh", kv.me, msg)
-		op := msg.Command.(Op)
-
-		if op.Seq > kv.clientSeqMap[op.Cid] {
-			switch op.Type {
-			case GET:
-				// do nothing
-			case PUT:
-				kv.store[op.Key] = op.Value
-			case APPEND:
-				kv.store[op.Key] += op.Value
+		if msg.CommandValid {
+			op := msg.Command.(Op)
+			var indicator string
+			if op.Seq > kv.clientSeqMap[op.Cid] {
+				indicator = "[>]"
+			} else {
+				indicator = "[<]"
 			}
+			DPrintf("=%v= %v <- applyCh. op.Seq=%v, kv.clientSeqMap[cid]=%v, %v", kv.me, msg, op.Seq, kv.clientSeqMap[op.Cid], indicator)
 
-			kv.clientSeqMap[op.Cid] = op.Seq
-			if _, exists := kv.applyResMap[op.Cid]; !exists {
-				kv.applyResMap[op.Cid] = make(map[int]bool)
+			if op.Seq > kv.clientSeqMap[op.Cid] {
+				switch op.Type {
+				case GET:
+					// do nothing
+				case PUT:
+					kv.store[op.Key] = op.Value
+				case APPEND:
+					kv.store[op.Key] += op.Value
+				}
+
+				kv.lastAppliedIndex = msg.CommandIndex
+				kv.lastAppliedTerm = msg.CommandTerm
+
+				kv.clientSeqMap[op.Cid] = op.Seq
+				if _, exists := kv.applyResMap[op.Cid]; !exists {
+					kv.applyResMap[op.Cid] = make(map[int]bool)
+				}
+				kv.applyResMap[op.Cid][op.Seq] = true
+				kv.reduceState(op.Cid, op.Seq)
+				DPrintf("=%v= lastAppliedIndex=%v, clientSeqMap=%v", kv.me, kv.lastAppliedIndex, kv.clientSeqMap)
+				kv.applyCond.Broadcast()
 			}
-			kv.applyResMap[op.Cid][op.Seq] = true
-			DPrintf("=%v= clientSeqMap=%v, applyResMap=%v", kv.me, kv.clientSeqMap, kv.applyResMap)
-			kv.applyCond.Broadcast()
+		} else {
+			DPrintf("=%v= snapshot <- applyCh", kv.me)
+			snapshot := msg.Command.([]byte)
+			kv.readSnapshot(snapshot)
+			kv.mu.Unlock()
+			continue
 		}
 
+		kv.snapshotCheck()
 		kv.mu.Unlock()
+	}
+}
+
+func (kv *KVServer) reduceState(cid int64, maxSeq int) {
+	for seq := range kv.applyResMap[cid] {
+		if seq < maxSeq {
+			delete(kv.applyResMap[cid], seq)
+		}
+	}
+}
+
+//
+// Check if it's time to take a snapshot.
+// The caller should hold kv.mu throughout the call.
+func (kv *KVServer) snapshotCheck() {
+	threshold := float32(0.8)
+	maxRaftState := float32(kv.maxraftstate)
+	currStateSize := float32(kv.persister.RaftStateSize())
+	if maxRaftState > -1 && currStateSize > maxRaftState*threshold {
+		kv.rf.TakeSnapshot(kv.lastAppliedIndex, kv.lastAppliedTerm, kv.getSnapshot())
+		DPrintf("<%v> finishes snapshot. LastAppliedIndex=%v", kv.me, kv.lastAppliedIndex)
+	}
+}
+
+func (kv *KVServer) getSnapshot() []byte {
+	buffer := new(bytes.Buffer)
+	encoder := labgob.NewEncoder(buffer)
+	encoder.Encode(kv.store)
+	encoder.Encode(kv.clientSeqMap)
+	snapshot := buffer.Bytes()
+	return snapshot
+}
+
+func (kv *KVServer) readSnapshot(data []byte) {
+	if data == nil || len(data) < 1 {
+		DPrintf("=%v= the snapshot is useless", kv.me)
+		return
+	}
+
+	var store map[string]string
+	var clientSeqMap map[int64]int
+	buffer := bytes.NewBuffer(data)
+	decoder := labgob.NewDecoder(buffer)
+	if decoder.Decode(&store) != nil ||
+		decoder.Decode(&clientSeqMap) != nil {
+		DPrintf("<%v> cannot read snapshot", kv.me)
+	} else {
+		kv.store = store
+		kv.clientSeqMap = clientSeqMap
+		DPrintf("=%v= read from snapshot: store=%v, clientSeqMap=%v", kv.me, kv.store, kv.clientSeqMap)
 	}
 }
 
@@ -186,12 +260,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.persister = persister
 
 	kv.store = make(map[string]string)
 	kv.clientSeqMap = make(map[int64]int)
 	kv.applyResMap = make(map[int64](map[int]bool))
 	kv.applyCond = sync.NewCond(&kv.mu)
-	kv.waitApplyTime = 300 * time.Millisecond
+	kv.waitApplyTime = 500 * time.Millisecond
 
 	go kv.applyCommitted()
 	return kv

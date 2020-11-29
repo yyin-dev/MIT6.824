@@ -60,11 +60,11 @@ func (ck *Clerk) Get(key string) string {
 			switch reply.Err {
 			case OK:
 				ck.prevLeader = i
-				DPrintf("Client: GET(%v) -> %v.", key, reply.Value)
+				DPrintf("Client: GET(%v) done -> %v.", key, reply.Value)
 				return reply.Value
 			case ErrNoKey:
 				ck.prevLeader = i
-				DPrintf("Client: GET(%v) -> %v.", key, "")
+				DPrintf("Client: GET(%v) done -> %v.", key, "")
 				return ""
 			case ErrWrongLeader:
 				continue
