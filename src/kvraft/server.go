@@ -1,7 +1,6 @@
 package kvraft
 
 import (
-	"bytes"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,78 +33,60 @@ type KVServer struct {
 	dead         int32 // set by Kill()
 	maxraftstate int   // snapshot if log grows this big
 
-	store         map[string]string
-	clientSeqMap  map[int64]int
-	applyResMap   map[int64](map[int]bool)
-	applyCond     *sync.Cond
+	store        map[string]string
+	clientSeqMap map[int64]int
+	waitChans    map[int](chan Op)
+
 	waitApplyTime time.Duration
 	persister     *raft.Persister
+}
 
-	lastAppliedIndex int
-	lastAppliedTerm  int
+func (kv *KVServer) getWaitCh(index int) chan Op {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	ch, ok := kv.waitChans[index]
+	if !ok {
+		ch = make(chan Op, 1)
+		kv.waitChans[index] = ch
+	}
+	return ch
+}
+
+func (a Op) sameAs(b Op) bool {
+	return a.Cid == b.Cid && a.Seq == b.Seq
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	kv.mu.Lock()
-	if args.Seq < kv.clientSeqMap[args.Cid] {
-		// A greater Seq has been seen. So args.Seq already finished.
-		kv.mu.Unlock()
-		return
-	}
-
-	// args.Seq >= kv.clientSeqMap[args.Cid]
 	op := Op{
 		Type: GET,
 		Key:  args.Key,
 		Cid:  args.Cid,
 		Seq:  args.Seq,
 	}
-	_, _, isLeader := kv.rf.Start(op)
+	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
-		kv.mu.Unlock()
 		return
 	}
 
-	// isLeader = true
-	waitApplyCh := make(chan bool)
-	go func(cid int64, seq int) {
-		// Wait until kv.applyResMap[cid][seq] exists and send on waitApplyCh
-		kv.mu.Lock()
-
-		_, applied := kv.applyResMap[cid][seq]
-		for !applied {
-			kv.applyCond.Wait()
-			_, applied = kv.applyResMap[cid][seq]
-		}
-
-		kv.mu.Unlock()
-		waitApplyCh <- true
-	}(args.Cid, args.Seq)
-	kv.mu.Unlock()
-
+	ch := kv.getWaitCh(index)
 	select {
-	case <-waitApplyCh:
-		kv.mu.Lock()
-		if v, exists := kv.store[args.Key]; exists {
-			reply.Err = OK
-			reply.Value = v
-		} else {
-			reply.Err = ErrNoKey
+	case appliedOp := <-ch:
+		if op.sameAs(appliedOp) {
+			reply.Value = appliedOp.Value
+			if reply.Value == "" {
+				reply.Err = ErrNoKey
+			} else {
+				reply.Err = OK
+			}
 		}
-		kv.mu.Unlock()
 	case <-time.After(kv.waitApplyTime):
 		reply.Err = ErrWrongLeader
 	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	kv.mu.Lock()
-	if args.Seq < kv.clientSeqMap[args.Cid] {
-		kv.mu.Unlock()
-		return
-	}
-
 	op := Op{
 		Type:  args.Op,
 		Key:   args.Key,
@@ -113,31 +94,18 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		Cid:   args.Cid,
 		Seq:   args.Seq,
 	}
-	_, _, isLeader := kv.rf.Start(op)
+	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
-		kv.mu.Unlock()
 		return
 	}
 
-	waitApplyCh := make(chan bool)
-	go func(cid int64, seq int) {
-		kv.mu.Lock()
-
-		_, applied := kv.applyResMap[cid][seq]
-		for !applied {
-			kv.applyCond.Wait()
-			_, applied = kv.applyResMap[cid][seq]
-		}
-
-		kv.mu.Unlock()
-		waitApplyCh <- true
-	}(args.Cid, args.Seq)
-	kv.mu.Unlock()
-
+	ch := kv.getWaitCh(index)
 	select {
-	case <-waitApplyCh:
-		reply.Err = OK
+	case appliedOp := <-ch:
+		if op.sameAs(appliedOp) {
+			reply.Err = OK
+		}
 	case <-time.After(kv.waitApplyTime):
 		reply.Err = ErrWrongLeader
 	}
@@ -145,100 +113,35 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 func (kv *KVServer) applyCommitted() {
 	for msg := range kv.applyCh {
+		if kv.killed() {
+			return
+		}
+
+		op := msg.Command.(Op)
 		kv.mu.Lock()
 
-		if msg.CommandValid {
-			op := msg.Command.(Op)
-			var indicator string
-			if op.Seq > kv.clientSeqMap[op.Cid] {
-				indicator = "[>]"
-			} else {
-				indicator = "[<]"
+		if op.Seq > kv.clientSeqMap[op.Cid] {
+			switch op.Type {
+			case GET:
+				// do nothing
+			case PUT:
+				kv.store[op.Key] = op.Value
+			case APPEND:
+				kv.store[op.Key] += op.Value
 			}
-			DPrintf("=%v= %v <- applyCh. op.Seq=%v, kv.clientSeqMap[cid]=%v, %v", kv.me, msg, op.Seq, kv.clientSeqMap[op.Cid], indicator)
 
-			if op.Seq > kv.clientSeqMap[op.Cid] {
-				switch op.Type {
-				case GET:
-					// do nothing
-				case PUT:
-					kv.store[op.Key] = op.Value
-				case APPEND:
-					kv.store[op.Key] += op.Value
-				}
-
-				kv.lastAppliedIndex = msg.CommandIndex
-				kv.lastAppliedTerm = msg.CommandTerm
-
-				kv.clientSeqMap[op.Cid] = op.Seq
-				if _, exists := kv.applyResMap[op.Cid]; !exists {
-					kv.applyResMap[op.Cid] = make(map[int]bool)
-				}
-				kv.applyResMap[op.Cid][op.Seq] = true
-				kv.reduceState(op.Cid, op.Seq)
-				DPrintf("=%v= lastAppliedIndex=%v, clientSeqMap=%v", kv.me, kv.lastAppliedIndex, kv.clientSeqMap)
-				kv.applyCond.Broadcast()
-			}
+			kv.clientSeqMap[op.Cid] = op.Seq
+			DPrintf("=%v= %v <- applyCh, store=%v:%v", kv.me, msg, op.Key, kv.store[op.Key])
 		} else {
-			DPrintf("=%v= snapshot <- applyCh", kv.me)
-			snapshot := msg.Command.([]byte)
-			kv.readSnapshot(snapshot)
-			kv.mu.Unlock()
-			continue
+			DPrintf("=%v= %v <- applyCh, duplicate", kv.me, msg)
 		}
 
-		kv.snapshotCheck()
+		if op.Type == GET {
+			op.Value = kv.store[op.Key]
+		}
 		kv.mu.Unlock()
-	}
-}
 
-func (kv *KVServer) reduceState(cid int64, maxSeq int) {
-	for seq := range kv.applyResMap[cid] {
-		if seq < maxSeq {
-			delete(kv.applyResMap[cid], seq)
-		}
-	}
-}
-
-//
-// Check if it's time to take a snapshot.
-// The caller should hold kv.mu throughout the call.
-func (kv *KVServer) snapshotCheck() {
-	threshold := float32(0.8)
-	maxRaftState := float32(kv.maxraftstate)
-	currStateSize := float32(kv.persister.RaftStateSize())
-	if maxRaftState > -1 && currStateSize > maxRaftState*threshold {
-		kv.rf.TakeSnapshot(kv.lastAppliedIndex, kv.lastAppliedTerm, kv.getSnapshot())
-		DPrintf("<%v> finishes snapshot. LastAppliedIndex=%v", kv.me, kv.lastAppliedIndex)
-	}
-}
-
-func (kv *KVServer) getSnapshot() []byte {
-	buffer := new(bytes.Buffer)
-	encoder := labgob.NewEncoder(buffer)
-	encoder.Encode(kv.store)
-	encoder.Encode(kv.clientSeqMap)
-	snapshot := buffer.Bytes()
-	return snapshot
-}
-
-func (kv *KVServer) readSnapshot(data []byte) {
-	if data == nil || len(data) < 1 {
-		DPrintf("=%v= the snapshot is useless", kv.me)
-		return
-	}
-
-	var store map[string]string
-	var clientSeqMap map[int64]int
-	buffer := bytes.NewBuffer(data)
-	decoder := labgob.NewDecoder(buffer)
-	if decoder.Decode(&store) != nil ||
-		decoder.Decode(&clientSeqMap) != nil {
-		DPrintf("<%v> cannot read snapshot", kv.me)
-	} else {
-		kv.store = store
-		kv.clientSeqMap = clientSeqMap
-		DPrintf("=%v= read from snapshot: store=%v, clientSeqMap=%v", kv.me, kv.store, kv.clientSeqMap)
+		kv.getWaitCh(msg.CommandIndex) <- op
 	}
 }
 
@@ -264,9 +167,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.store = make(map[string]string)
 	kv.clientSeqMap = make(map[int64]int)
-	kv.applyResMap = make(map[int64](map[int]bool))
-	kv.applyCond = sync.NewCond(&kv.mu)
-	kv.waitApplyTime = 500 * time.Millisecond
+	kv.waitChans = make(map[int](chan Op))
+	kv.waitApplyTime = 1000 * time.Millisecond
 
 	go kv.applyCommitted()
 	return kv

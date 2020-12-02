@@ -44,7 +44,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-	DPrintf("Client: GET(%v) starts", key)
+	DPrintf("Client: GET(%v) [%v] starts", key, ck.cid)
 
 	args := GetArgs{
 		Key: key,
@@ -60,11 +60,11 @@ func (ck *Clerk) Get(key string) string {
 			switch reply.Err {
 			case OK:
 				ck.prevLeader = i
-				DPrintf("Client: GET(%v) done -> %v.", key, reply.Value)
+				DPrintf("Client: GET(%v) [%v] done -> %v.", key, ck.cid, reply.Value)
 				return reply.Value
 			case ErrNoKey:
 				ck.prevLeader = i
-				DPrintf("Client: GET(%v) done -> %v.", key, "")
+				DPrintf("Client: GET(%v) [%v] done -> %v.", key, ck.cid, "")
 				return ""
 			case ErrWrongLeader:
 				continue
@@ -85,7 +85,7 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	DPrintf("Client: %v(%v, %v) starts", op, key, value)
+	DPrintf("Client: %v(%v, %v) [%v] starts", op, key, value, ck.cid)
 	args := PutAppendArgs{
 		Key:   key,
 		Value: value,
@@ -102,7 +102,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			switch reply.Err {
 			case OK:
 				ck.prevLeader = i
-				DPrintf("Client: %v(%v, %v) done", op, key, value)
+				DPrintf("Client: %v(%v, %v) [%v] done", op, key, value, ck.cid)
 				return
 			case ErrWrongLeader:
 				continue
