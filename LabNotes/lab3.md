@@ -414,9 +414,9 @@ func (kv *KVServer) readSnapshot(data []byte) {
     The AppendEntries RPC requires careful changes. See the illustration below:
 
     ```
-                       CaseA     CaseB				  CaseC
-    args.prevLogIndex    ↓		  ↓					  ↓
-           				    □ □ □ □ □ □ □ □ □ □ □ □ □
+                      CaseA      CaseB                 CaseC
+    args.PrevLogIndex   ↓          ↓                     ↓
+                             □ □ □ □ □ □ □ □ □ □ □ □ □
                            ↑
                     LastIncludedIndex
     ```

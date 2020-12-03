@@ -347,11 +347,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// Reset election timer
 	rf.prevTimeElecSuppressed = time.Now()
 
-	//                CaseA     CaseB				  CaseC
-	// prevLogIndex     ↓		  ↓						↓
-	//        				□ □ □ □ □ □ □ □ □ □ □ □ □
-	//                    ↑
-	// 					LastIncludedIndex
+	//                   CaseA      CaseB                 CaseC
+	// args.PrevLogIndex   ↓          ↓                     ↓
+	//                         □ □ □ □ □ □ □ □ □ □ □ □ □
+	//                       ↑
+	//                 LastIncludedIndex
 
 	// "If the leader has no new entries to send to a particular peer, the
 	// AppendEntries RPC contains no entries, and is considered a heartbeat."
