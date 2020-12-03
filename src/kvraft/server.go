@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -117,31 +118,84 @@ func (kv *KVServer) applyCommitted() {
 			return
 		}
 
-		op := msg.Command.(Op)
-		kv.mu.Lock()
+		if msg.CommandValid {
+			op := msg.Command.(Op)
+			kv.mu.Lock()
 
-		if op.Seq > kv.clientSeqMap[op.Cid] {
-			switch op.Type {
-			case GET:
-				// do nothing
-			case PUT:
-				kv.store[op.Key] = op.Value
-			case APPEND:
-				kv.store[op.Key] += op.Value
+			if op.Seq > kv.clientSeqMap[op.Cid] {
+				switch op.Type {
+				case GET:
+					// do nothing
+				case PUT:
+					kv.store[op.Key] = op.Value
+				case APPEND:
+					kv.store[op.Key] += op.Value
+				}
+
+				kv.clientSeqMap[op.Cid] = op.Seq
+				DPrintf("=%v= %v <- applyCh, store=%v:%v", kv.me, msg, op.Key, kv.store[op.Key])
+			} else {
+				DPrintf("=%v= %v <- applyCh, duplicate", kv.me, msg)
 			}
 
-			kv.clientSeqMap[op.Cid] = op.Seq
-			DPrintf("=%v= %v <- applyCh, store=%v:%v", kv.me, msg, op.Key, kv.store[op.Key])
+			if op.Type == GET {
+				op.Value = kv.store[op.Key]
+			}
+			kv.snapshotCheck(msg.CommandIndex)
+			kv.mu.Unlock()
+
+			kv.getWaitCh(msg.CommandIndex) <- op
 		} else {
-			DPrintf("=%v= %v <- applyCh, duplicate", kv.me, msg)
+			DPrintf("=%v= snapshot <- applyCh", kv.me)
+			snapshot := msg.Command.([]byte)
+			kv.readSnapshot(snapshot)
 		}
+	}
+}
 
-		if op.Type == GET {
-			op.Value = kv.store[op.Key]
-		}
-		kv.mu.Unlock()
+//
+// Check if it's time to take a snapshot.
+// The caller should hold kv.mu throughout the call.
+func (kv *KVServer) snapshotCheck(lastAppliedIndex int) {
+	threshold := float32(0.7)
+	maxRaftState := float32(kv.maxraftstate)
+	currStateSize := float32(kv.persister.RaftStateSize())
+	if maxRaftState > -1 && currStateSize > maxRaftState*threshold {
+		// DPrintf("=%v= starts taking snapshot. LastAppliedIndex=%v", kv.me, lastAppliedIndex)
+		go kv.rf.TakeSnapshot(lastAppliedIndex, kv.getSnapshot())
+		// DPrintf("=%v= finishes snapshot. LastAppliedIndex=%v, store=%v", kv.me, lastAppliedIndex, kv.store)
+	}
+}
 
-		kv.getWaitCh(msg.CommandIndex) <- op
+func (kv *KVServer) getSnapshot() []byte {
+	buffer := new(bytes.Buffer)
+	encoder := labgob.NewEncoder(buffer)
+	encoder.Encode(kv.store)
+	encoder.Encode(kv.clientSeqMap)
+	snapshot := buffer.Bytes()
+	return snapshot
+}
+
+func (kv *KVServer) readSnapshot(data []byte) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	if data == nil || len(data) < 1 {
+		// DPrintf("=%v= the snapshot is useless", kv.me)
+		return
+	}
+
+	var store map[string]string
+	var clientSeqMap map[int64]int
+	buffer := bytes.NewBuffer(data)
+	decoder := labgob.NewDecoder(buffer)
+	if decoder.Decode(&store) != nil ||
+		decoder.Decode(&clientSeqMap) != nil {
+		DPrintf("=%v= cannot read snapshot", kv.me)
+	} else {
+		kv.store = store
+		kv.clientSeqMap = clientSeqMap
+		DPrintf("=%v= read from snapshot: store=%v, clientSeqMap=%v", kv.me, kv.store, kv.clientSeqMap)
 	}
 }
 
@@ -169,6 +223,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.clientSeqMap = make(map[int64]int)
 	kv.waitChans = make(map[int](chan Op))
 	kv.waitApplyTime = 1000 * time.Millisecond
+
+	kv.readSnapshot(kv.persister.ReadSnapshot())
 
 	go kv.applyCommitted()
 	return kv

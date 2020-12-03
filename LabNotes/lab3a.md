@@ -1,5 +1,7 @@
 # Lab3A: Key/value service without log compaction
 
+Note: this note is written before I refactored Lab3. For most up-to-date note, refer to `./lab3.md`.
+
 ## Client
 The client implementation is straight-forward. Use `prevLeader` to make it a bit more efficient.
 

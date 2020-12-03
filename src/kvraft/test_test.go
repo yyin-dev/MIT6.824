@@ -195,7 +195,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 		clnts[i] = make(chan int)
 	}
 	for i := 0; i < 3; i++ {
-		DPrintf("Iteration %v\n", i)
+		DPrintf("[TEST] Iteration %v\n", i)
 		atomic.StoreInt32(&done_clients, 0)
 		atomic.StoreInt32(&done_partitioner, 0)
 		go spawn_clients_and_wait(t, cfg, nclients, func(cli int, myck *Clerk, t *testing.T) {
@@ -221,6 +221,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 					}
 				}
 			}
+			// DPrintf("[TEST] Client %v done!", cli)
 		})
 
 		if partitions {
@@ -233,10 +234,10 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 
 		atomic.StoreInt32(&done_clients, 1)     // tell clients to quit
 		atomic.StoreInt32(&done_partitioner, 1) // tell partitioner to quit
-		DPrintf("[TEST] partitioner quits")
+		DPrintf("\n\n[TEST] signal clients to quit")
 
 		if partitions {
-			// log.Printf("wait for partitioner\n")
+			DPrintf("[TEST] wait for partitioner\n")
 			<-ch_partitioner
 			// reconnect network and submit a request. A client may
 			// have submitted a request in a minority.  That request
@@ -248,33 +249,39 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 		}
 
 		if crash {
-			// log.Printf("shutdown servers\n")
+			DPrintf("\n\n\n[TEST] Start shutting down server")
 			for i := 0; i < nservers; i++ {
 				cfg.ShutdownServer(i)
 			}
 			// Wait for a while for servers to shutdown, since
 			// shutdown isn't a real crash and isn't instantaneous
 			time.Sleep(electionTimeout)
+			DPrintf("\n\n\n[TEST] Done shutting down servers")
+
 			// log.Printf("restart servers\n")
 			// crash and re-start all
+			DPrintf("\n\n\n[TEST] Restarting servers")
 			for i := 0; i < nservers; i++ {
 				cfg.StartServer(i)
 			}
 			cfg.ConnectAll()
+
 		}
 
-		// log.Printf("wait for clients\n")
+		DPrintf("[TEST] wait for clients\n")
 		for i := 0; i < nclients; i++ {
 			// log.Printf("read from clients %d\n", i)
+			DPrintf("[TEST] waiting for client %v", i)
 			j := <-clnts[i]
 			// if j < 10 {
 			// 	log.Printf("Warning: client %d managed to perform only %d put operations in 1 sec?\n", i, j)
 			// }
 			key := strconv.Itoa(i)
-			// log.Printf("Check %v for client %d\n", j, i)
+			DPrintf("[TEST] Check %v for client %d\n", j, i)
 			v := Get(cfg, ck, key)
 			checkClntAppends(t, i, v, j)
 		}
+		DPrintf("[TEST] Done checking clients\n")
 
 		if maxraftstate > 0 {
 			// Check maximum after the servers have processed all client

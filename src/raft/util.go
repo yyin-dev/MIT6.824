@@ -18,17 +18,3 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 func IntRange(lower int, upper int) int {
 	return rand.Intn(upper-lower+1) + lower
 }
-
-func min(x int, y int) int {
-	if x < y {
-		return x
-	}
-	return y
-}
-
-func max(x int, y int) int {
-	if x > y {
-		return x
-	}
-	return y
-}
